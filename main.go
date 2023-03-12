@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"hash"
+	"hash/crc32"
 	"io"
 	"io/fs"
 	"log"
@@ -20,6 +22,20 @@ func main() {
 
 	var dir string
 	var err error
+	var h hash.Hash
+	var hSize int
+
+	// TODO: choose hash algorithm dynamically
+	{
+		_ = crc32.Size
+		_ = sha1.Size
+
+		h = crc32.NewIEEE()
+		hSize = crc32.Size
+
+		// h = sha1.New()
+		// hSize = sha1.Size
+	}
 
 	if flag.NArg() != 1 {
 		dir, err = os.Getwd()
@@ -50,6 +66,8 @@ func main() {
 	showEmpties := false
 
 	err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		defer h.Reset()
+
 		if !d.Type().IsRegular() {
 			return nil
 		}
@@ -71,7 +89,6 @@ func main() {
 		}
 		defer f.Close()
 
-		h := sha1.New()
 		_, err = io.Copy(h, f)
 		if err != nil {
 			log.Printf("failed to read file %s: %v", path, err)
@@ -85,18 +102,20 @@ func main() {
 			size: info.Size(),
 		}
 
-		if dups[x] != nil {
-			other := dups[x][0]
+		k := x + fmt.Sprintf("%016x", this.size)
+
+		if dups[k] != nil {
+			other := dups[k][0]
 			if this.size != other.size {
 				fmt.Println()
 				log.Printf("size: %d, path: %s, hash: %s\n", other.size, other.path, x)
 				log.Printf("size: %d, path: %s, hash: %s\n", this.size, this.path, x)
 				log.Panicln("found hash collision??")
 			}
-			dups[x] = append(dups[x], this)
+			dups[k] = append(dups[k], this)
 
 		} else {
-			dups[x] = []dup{this}
+			dups[k] = []dup{this}
 		}
 
 		return nil
@@ -107,7 +126,7 @@ func main() {
 			continue
 		}
 
-		fmt.Printf("these files have the same hash (%s):\n", k)
+		fmt.Printf("these files have the same hash (%s):\n", k[:hSize*2])
 		for _, p := range v {
 			fmt.Printf("  %d  %s\n", p.size, p.path)
 		}
