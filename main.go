@@ -15,12 +15,15 @@ import (
 )
 
 var fast bool
+var size int64
 
 func main() {
+
 	log.SetPrefix("")
 	log.SetFlags(0)
 
 	flag.BoolVar(&fast, "fast", false, "Process faster, but uses a less trustworthy algorithm")
+	flag.Int64Var(&size, "size", 0, "Will only process files greater than this value")
 	flag.Parse()
 
 	var dir string
@@ -76,6 +79,10 @@ func main() {
 
 		if showEmpties && info.Size() == 0 {
 			empties = append(empties, path)
+			return nil
+		}
+
+		if info.Size() < size {
 			return nil
 		}
 
