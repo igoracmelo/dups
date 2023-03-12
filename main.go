@@ -14,10 +14,13 @@ import (
 	"path/filepath"
 )
 
+var fast bool
+
 func main() {
 	log.SetPrefix("")
 	log.SetFlags(0)
 
+	flag.BoolVar(&fast, "fast", false, "Process faster, but uses a less trustworthy algorithm")
 	flag.Parse()
 
 	var dir string
@@ -25,16 +28,12 @@ func main() {
 	var h hash.Hash
 	var hSize int
 
-	// TODO: choose hash algorithm dynamically
-	{
-		_ = crc32.Size
-		_ = sha1.Size
-
+	if fast {
 		h = crc32.NewIEEE()
 		hSize = crc32.Size
-
-		// h = sha1.New()
-		// hSize = sha1.Size
+	} else {
+		h = sha1.New()
+		hSize = sha1.Size
 	}
 
 	if flag.NArg() != 1 {
