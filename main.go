@@ -12,12 +12,15 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/pprof"
 	"sync"
 )
 
 var fast bool
 var minSize int64
+
+const cpuProf = false
 
 func main() {
 
@@ -31,12 +34,14 @@ func main() {
 	var dir string
 	var err error
 
-	f, err := os.Create("cpu.prof")
-	if err != nil {
-		log.Panic(err)
+	if cpuProf {
+		f, err := os.Create("cpu.prof")
+		if err != nil {
+			log.Panic(err)
+		}
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
 	}
-	pprof.StartCPUProfile(f)
-	defer pprof.StopCPUProfile()
 
 	if flag.NArg() != 1 {
 		flag.Usage()
@@ -117,6 +122,7 @@ func newRunner(dirpath string, fast bool, minSize int64) *runner {
 
 func (r *runner) getFileInfos() error {
 	wg := sync.WaitGroup{}
+	limit := make(chan struct{}, 5)
 
 	err := filepath.WalkDir(r.dirpath, func(path string, d fs.DirEntry, err error) error {
 		if !d.Type().IsRegular() {
@@ -124,9 +130,11 @@ func (r *runner) getFileInfos() error {
 		}
 
 		wg.Add(1)
+		limit <- struct{}{}
 
 		go func() {
 			defer wg.Done()
+			defer func() { <-limit }()
 
 			s, err := os.Stat(path)
 			if err != nil {
@@ -151,15 +159,15 @@ func (r *runner) getFileInfos() error {
 }
 
 func (r *runner) hashFiles() {
-	limit := make(chan struct{}, 1)
+	limit := make(chan struct{}, runtime.NumCPU())
 	wg := sync.WaitGroup{}
 
 	for j := range r.jobs {
 		j := j
 		wg.Add(1)
+		limit <- struct{}{}
 
 		go func() {
-			limit <- struct{}{}
 			defer func() { <-limit }()
 			defer wg.Done()
 
@@ -169,12 +177,12 @@ func (r *runner) hashFiles() {
 				log.Printf("failed to open %s: %v", j.path, err)
 				return
 			}
-
-			log.Printf(">>> hashing %s\n", j.path)
+			defer f.Close()
 
 			_, err = io.Copy(h, f)
 			if err != nil {
 				log.Printf("failed to read %s: %v", j.path, err)
+				return
 			}
 
 			sum := h.Sum(nil)
@@ -193,9 +201,7 @@ func (r *runner) hashFiles() {
 }
 
 func (r *runner) processResults() {
-	results := make(chan hashResult, 1)
-
-	for res := range results {
+	for res := range r.results {
 		if r.dups[res.key] == nil {
 			r.dups[res.key] = []dup{}
 		}
