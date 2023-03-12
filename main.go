@@ -37,13 +37,11 @@ func main() {
 	}
 
 	if flag.NArg() != 1 {
-		dir, err = os.Getwd()
-		if err != nil {
-			log.Panic(err)
-		}
-	} else {
-		dir = flag.Arg(0)
+		flag.Usage()
+		os.Exit(1)
 	}
+
+	dir = flag.Arg(0)
 
 	s, err := os.Stat(dir)
 	if err != nil {
