@@ -12,10 +12,12 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
+	"sync"
 )
 
 var fast bool
-var size int64
+var minSize int64
 
 func main() {
 
@@ -23,21 +25,18 @@ func main() {
 	log.SetFlags(0)
 
 	flag.BoolVar(&fast, "fast", false, "Process faster, but uses a less trustworthy algorithm")
-	flag.Int64Var(&size, "size", 0, "Will only process files greater than this value")
+	flag.Int64Var(&minSize, "size", 0, "Will only process files greater than this value")
 	flag.Parse()
 
 	var dir string
 	var err error
-	var h hash.Hash
-	var hSize int
 
-	if fast {
-		h = crc32.NewIEEE()
-		hSize = crc32.Size
-	} else {
-		h = sha1.New()
-		hSize = sha1.Size
+	f, err := os.Create("cpu.prof")
+	if err != nil {
+		log.Panic(err)
 	}
+	pprof.StartCPUProfile(f)
+	defer pprof.StopCPUProfile()
 
 	if flag.NArg() != 1 {
 		flag.Usage()
@@ -55,91 +54,175 @@ func main() {
 		log.Panicf("not a directory: %s", s.Name())
 	}
 
-	type dup struct {
-		path string
-		size int64
+	runner := newRunner(dir, fast, minSize)
+
+	go runner.getFileInfos()
+	go runner.hashFiles()
+
+	runner.processResults()
+	runner.printResults()
+}
+
+type runner struct {
+	newHash     func() hash.Hash
+	hashSize    int
+	dirpath     string
+	showEmpties bool
+	minSize     int64
+	fast        bool
+	dups        map[string][]dup
+	empties     []string
+	jobs        chan hashJob
+	results     chan hashResult
+}
+
+type dup struct {
+	size int64
+	path string
+}
+
+type hashJob struct {
+	path string
+	size int64
+}
+
+type hashResult struct {
+	key  string
+	path string
+	size int64
+}
+
+func newRunner(dirpath string, fast bool, minSize int64) *runner {
+	r := &runner{
+		dirpath:     dirpath,
+		fast:        fast,
+		minSize:     minSize,
+		showEmpties: false, // TODO
+		empties:     []string{},
+		dups:        map[string][]dup{},
+		jobs:        make(chan hashJob, 1),
+		results:     make(chan hashResult, 1),
 	}
 
-	dups := map[string][]dup{}
-	empties := []string{}
+	if fast {
+		r.newHash = func() hash.Hash { return crc32.NewIEEE() }
+		r.hashSize = crc32.Size
+	} else {
+		r.newHash = sha1.New
+		r.hashSize = sha1.Size
+	}
 
-	showEmpties := false
+	return r
+}
 
-	err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		defer h.Reset()
+func (r *runner) getFileInfos() error {
+	wg := sync.WaitGroup{}
 
+	err := filepath.WalkDir(r.dirpath, func(path string, d fs.DirEntry, err error) error {
 		if !d.Type().IsRegular() {
 			return nil
 		}
 
-		info, err := d.Info()
-		if err != nil {
-			log.Printf("failed to get info from file: %s", path)
-		}
+		wg.Add(1)
 
-		if showEmpties && info.Size() == 0 {
-			empties = append(empties, path)
-			return nil
-		}
+		go func() {
+			defer wg.Done()
 
-		if info.Size() < size {
-			return nil
-		}
-
-		f, err := os.Open(path)
-		if err != nil {
-			log.Printf("failed to open %s: %v", path, err)
-			return nil
-		}
-		defer f.Close()
-
-		_, err = io.Copy(h, f)
-		if err != nil {
-			log.Printf("failed to read file %s: %v", path, err)
-		}
-
-		sum := h.Sum(nil)
-		x := hex.EncodeToString(sum)
-
-		this := dup{
-			path: path,
-			size: info.Size(),
-		}
-
-		k := x + fmt.Sprintf("%016x", this.size)
-
-		if dups[k] != nil {
-			other := dups[k][0]
-			if this.size != other.size {
-				fmt.Println()
-				log.Printf("size: %d, path: %s, hash: %s\n", other.size, other.path, x)
-				log.Printf("size: %d, path: %s, hash: %s\n", this.size, this.path, x)
-				log.Panicln("found hash collision??")
+			s, err := os.Stat(path)
+			if err != nil {
+				log.Printf("failed to get stat: %s\n%v", s.Name(), err)
+				return
 			}
-			dups[k] = append(dups[k], this)
 
-		} else {
-			dups[k] = []dup{this}
-		}
+			// log.Printf(">>> job: %s, %d\n", path, s.Size())
+			r.jobs <- hashJob{
+				path: path,
+				size: s.Size(),
+			}
+		}()
 
 		return nil
 	})
 
-	for k, v := range dups {
+	wg.Wait()
+	close(r.jobs)
+
+	return err
+}
+
+func (r *runner) hashFiles() {
+	limit := make(chan struct{}, 1)
+	wg := sync.WaitGroup{}
+
+	for j := range r.jobs {
+		j := j
+		wg.Add(1)
+
+		go func() {
+			limit <- struct{}{}
+			defer func() { <-limit }()
+			defer wg.Done()
+
+			h := r.newHash()
+			f, err := os.Open(j.path)
+			if err != nil {
+				log.Printf("failed to open %s: %v", j.path, err)
+				return
+			}
+
+			log.Printf(">>> hashing %s\n", j.path)
+
+			_, err = io.Copy(h, f)
+			if err != nil {
+				log.Printf("failed to read %s: %v", j.path, err)
+			}
+
+			sum := h.Sum(nil)
+			key := hex.EncodeToString(sum) + fmt.Sprintf("%016x", j.size)
+
+			r.results <- hashResult{
+				key:  key,
+				path: j.path,
+				size: j.size,
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(r.results)
+}
+
+func (r *runner) processResults() {
+	results := make(chan hashResult, 1)
+
+	for res := range results {
+		if r.dups[res.key] == nil {
+			r.dups[res.key] = []dup{}
+		}
+		this := dup{
+			size: res.size,
+			path: res.path,
+		}
+		r.dups[res.key] = append(r.dups[res.key], this)
+	}
+}
+
+func (r *runner) printResults() {
+	for k, v := range r.dups {
 		if len(v) == 1 {
 			continue
 		}
 
-		fmt.Printf("these files have the same hash (%s):\n", k[:hSize*2])
+		fmt.Printf("these files have the same hash (%s):\n", k[:r.hashSize*2])
 		for _, p := range v {
 			fmt.Printf("  %d  %s\n", p.size, p.path)
 		}
 		fmt.Println()
 	}
 
-	if showEmpties && len(empties) > 0 {
+	if r.showEmpties && len(r.empties) > 0 {
 		fmt.Println("these files are empty:")
-		for _, v := range empties {
+		for _, v := range r.empties {
 			fmt.Println(" ", v)
 		}
 	}
