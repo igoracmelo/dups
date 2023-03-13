@@ -10,10 +10,22 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"sync"
 )
 
+const cpuProf = false
+
 func main() {
+	if cpuProf {
+		f, err := os.Create("cpu.prof")
+		if err != nil {
+			panic(err)
+		}
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
+
 	pathBySize := map[int64][]string{}
 
 	err := filepath.WalkDir(os.Args[1], func(path string, d fs.DirEntry, err error) error {
