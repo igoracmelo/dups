@@ -78,8 +78,8 @@ func main() {
 }
 
 func equalReaders(r1 io.Reader, r2 io.Reader) (bool, error) {
-	buf1 := make([]byte, 1024)
-	buf2 := make([]byte, 1024)
+	buf1 := make([]byte, 4096)
+	buf2 := make([]byte, 4096)
 
 	for {
 		n1, err1 := r1.Read(buf1)
