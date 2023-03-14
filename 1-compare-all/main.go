@@ -25,12 +25,20 @@ func main() {
 
 	if err != nil {
 		log.Print(err)
+		return
 	}
 
-	for _, p1 := range paths {
-		dups := []string{}
+	if len(paths) < 2 {
+		return
+	}
 
-		for _, p2 := range paths[1:] {
+	for i := 0; i < len(paths)-1; i++ {
+		dups := []string{}
+		p1 := paths[i]
+
+		for j := i + 1; j < len(paths); j++ {
+			p2 := paths[j]
+
 			func() {
 				f1, err := os.Open(p1)
 				if err != nil {
@@ -79,8 +87,8 @@ func equalReaders(r1 io.Reader, r2 io.Reader) (bool, error) {
 			return false, err1
 		}
 
-		n2, err2 := r1.Read(buf1)
-		if err1 != err2 && err2 != io.EOF {
+		n2, err2 := r2.Read(buf2)
+		if err2 != nil && err2 != io.EOF {
 			return false, err2
 		}
 
